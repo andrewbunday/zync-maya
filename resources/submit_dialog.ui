@@ -306,7 +306,7 @@
          </font>
         </property>
         <property name="text">
-         <string>Num. Instances: </string>
+         <string>Num. Slots: </string>
         </property>
         <property name="textFormat">
          <enum>Qt::AutoText</enum>
@@ -354,12 +354,12 @@
          </spacer>
         </item>
         <item>
-         <widget class="QCheckBox" name="start_new_instances">
+         <widget class="QCheckBox" name="start_new_slots">
           <property name="text">
-           <string>Only Use Running Instances</string>
+           <string>Only Use Running Slots</string>
           </property>
           <property name="-v" stdset="0">
-           <string>`python &quot;cmds.submit_callb('start_new_instances')&quot;`</string>
+           <string>`python &quot;cmds.submit_callb('start_new_slots')&quot;`</string>
           </property>
          </widget>
         </item>
@@ -986,7 +986,7 @@
   <tabstop>num_instances</tabstop>
   <tabstop>instance_type</tabstop>
   <tabstop>upload_only</tabstop>
-  <tabstop>start_new_instances</tabstop>
+  <tabstop>start_new_slots</tabstop>
   <tabstop>skip_check</tabstop>
   <tabstop>notify_complete</tabstop>
   <tabstop>project</tabstop>
