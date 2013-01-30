@@ -20,6 +20,7 @@ import os
 import platform
 import sys
 import time
+import shlex
 
 __author__ = 'Alex Schworer'
 __copyright__ = 'Copyright 2011, Atomic Fiction, Inc.'
@@ -38,10 +39,77 @@ for key in required_config:
 sys.path.append( API_DIR )
 import zync
 
-
 UI_FILE = "%s/resources/submit_dialog.ui" % ( os.path.dirname( __file__ ), )
 
 import maya.cmds as cmds
+
+def even(num):
+    return bool(num % 2)
+
+def odd(num):
+    return not bool(num % 2)
+
+def _substitute(parts, tokens, allOrNothing=False, leaveUnmatchedTokens=False):
+    result = []
+    for i, tok in enumerate(parts):
+        if even(i):
+            try:
+                tokn = tokens[tok]
+                if tokn is None:
+                    result.append('<%s>' % tok)
+                else:
+                    result.append(tokn.replace(':', '_'))
+            except KeyError:
+                if allOrNothing:
+                    if leaveUnmatchedTokens:
+                        return '<%s>' % tok
+                    else:
+                        return ''
+                elif leaveUnmatchedTokens:
+                    result.append('<%s>' % tok)
+                else:
+                    result.append('')
+        else:
+            result.append(tok)
+    return ''.join(result)
+
+def expandFileTokens(path, tokens, leaveUnmatchedTokens=False):
+    """
+    path : str
+        unexpanded path, containing tokens of the form <MyToken>
+
+    tokens : dict or str
+        dictionary of the form {'MyToken' : value} or space separated string of form 'MyToken=value'
+
+    This is a token expansion system based on Maya's, but with several improvements.
+    In addition to standard tokens of the form <MyToken>, it also supports
+    conditional groups using brackets, which will only be expanded if all the
+    tokens within it exist.
+
+    for example, in the following case, the group's contents (the underscore) are
+    included because the RenderPass token is filled:
+
+        >>> expandFileTokens('filename[_<RenderPass>].jpg', {'RenderPass' : 'Diffuse'})
+        'filename_Diffuse.jpg'
+
+    but in this case the contents enclosed in brackets is dropped:
+
+        >>> expandFileTokens('filename[_<RenderPass>].jpg', {})
+        'filename.jpg'
+    """
+    if isinstance(tokens, basestring):
+        tokens = dict([pair.split('=') for pair in shlex.split(tokens)])
+
+    grp_reg = re.compile('\[([^\]]+)\]')
+    tok_reg = re.compile('<([a-zA-Z]+)>')
+    result = []
+    for i, grp in enumerate(grp_reg.split(path)):
+        parts = tok_reg.split(grp)
+        if even(i):
+            result.append(_substitute(parts, tokens, allOrNothing=True, leaveUnmatchedTokens=leaveUnmatchedTokens))
+        else:
+            result.append(_substitute(parts, tokens, allOrNothing=False, leaveUnmatchedTokens=leaveUnmatchedTokens))
+    return ''.join(result)
 
 def generate_scene_path(extra_name=None):
     """
@@ -53,7 +121,7 @@ def generate_scene_path(extra_name=None):
     scene_path = cmds.file(q=True, loc=True)
 
     scene_dir = os.path.dirname(scene_path)
-    cloud_dir = '%s/cloud_submit' % ( scene_dir, ) 
+    cloud_dir = '%s/cloud_submit' % ( scene_dir, )
 
     if not os.path.exists(cloud_dir):
         os.makedirs(cloud_dir)
@@ -187,7 +255,7 @@ def get_scene_files():
                         yield scene_file.replace('\\', '/')
 
 def get_default_extension(renderer):
-    """Returns the filename prefix for the given renderer, either mental ray 
+    """Returns the filename prefix for the given renderer, either mental ray
        or maya software.
     """
     if renderer == zync.SOFTWARE_RENDERER:
@@ -213,6 +281,72 @@ def get_layer_override(layer, node, attribute='imageFilePrefix'):
     layer_override = cmds.getAttr(attr)
     cmds.editRenderLayerGlobals(currentRenderLayer=cur_layer)
     return layer_override
+
+def get_pass_names(renderer, layer):
+    """Helper method to return the passes for a given layer"""
+    cur_layer = cmds.editRenderLayerGlobals(q=True, currentRenderLayer=True)
+    cmds.editRenderLayerGlobals(currentRenderLayer=layer)
+
+    pass_names = []
+    if renderer == zync.VRAY_RENDERER:
+        render_element_nodes = cmds.ls(type="VRayRenderElement")
+        for element in render_element_nodes:
+            if cmds.getAttr(element + '.enabled'):
+                element_attrs = cmds.listAttr(element)
+                vray_name_attr = [ x for x in element_attrs if re.match('vray_name_.*', x) or re.match('vray_filename_.*', x) ]
+                pass_names.append(cmds.getAttr(element + '.' +vray_name_attr[0]))
+
+    if renderer == zync.MENTAL_RAY_RENDERER:
+        pass_names.append('MasterBeauty')
+        render_pass_nodes = cmds.listConnections(layer + '.renderPass')
+        if render_pass_nodes:
+            for pass_ in render_pass_nodes:
+                print "  pass %s for %s" % (pass_, layer)
+                if cmds.getAttr(pass_ + '.renderable'):
+                    pass_names.append(pass_)
+
+    cmds.editRenderLayerGlobals(currentRenderLayer=cur_layer)
+
+    return pass_names
+
+def create_local_paths(params):
+    """Creates a local file hierarchy to assist download of rendered frames with
+    a non standard file prefix."""
+
+    base_out_path = params['out_path']
+
+    # set render path for defaultRenderLayer *can't be deleted*
+    layer_paths = {}
+    default = os.path.dirname(os.path.join(base_out_path, params['scene_info']['file_prefix'][0]))
+    layer_paths['defaultRenderLayer'] = expandFileTokens(default, {'Layer':'masterLayer', 'RenderLayer':'masterLayer'}, leaveUnmatchedTokens=True)
+
+    # set render path for remaining layers
+    for path in params['scene_info']['file_prefix'][1:]:
+        for k,v in path.iteritems():
+            raw_layer_dir = os.path.dirname(os.path.join(base_out_path, v))
+            layer_paths[k] = expandFileTokens(raw_layer_dir, {'Layer': k, 'RenderLayer': k}, leaveUnmatchedTokens=True)
+
+    # next for each active layer create the directory path for the layer. This is appended to the end of the path
+    # in vray. MRay allows us to put RenderPass where ever we like.
+    for layer in params['selected_layers']:
+        # for each active pass attached to the layer, create the dir path
+        for pass_name in params['scene_info']['layer_passes'].get(layer, []):
+            if params['renderer'] == zync.VRAY_RENDERER:
+                pass_path = os.path.join(layer_paths[layer], pass_name)
+
+            elif params['renderer'] in (zync.MENTAL_RAY_RENDERER, zync.SOFTWARE_RENDERER):
+                pass_path = expandFileTokens(layer_paths[layer], {'RenderPass': pass_name})
+            else:
+                pass_path = layer_paths[layer]
+
+            print "  " + pass_path
+            if not os.path.exists(pass_path):
+                os.makedirs(pass_path)
+
+    if not params['scene_info']['layer_passes'].get(layer, []):
+        print "no passes selected for layer. creating path for layer only."
+        if not os.path.exists(layer_paths[layer]):
+            os.makedirs(layer_paths[layer])
 
 class MayaZyncException(Exception):
     """
@@ -241,7 +375,7 @@ class SubmitWindow(object):
 
         scene_name = cmds.file(q=True, loc=True)
         if scene_name == 'unknown':
-            cmds.error( 'Please save your script before launching a job.' ) 
+            cmds.error( 'Please save your script before launching a job.' )
 
         project_response = zync.get_project_name( scene_name )
         if project_response["code"] != 0:
@@ -254,7 +388,7 @@ class SubmitWindow(object):
         self.project = proj_dir()
         if self.project[-1] == "/":
             self.project = self.project[:-1]
-			
+
         maya_output_response = zync.get_maya_output_path( scene_name )
         if maya_output_response["code"] != 0:
             cmds.error( maya_output_response["response"] )
@@ -423,7 +557,7 @@ class SubmitWindow(object):
             if inst_type == zync.DEFAULT_INSTANCE_TYPE:
                 cmds.menuItem( parent='instance_type', label='%s (%s)' % ( inst_type, zync.INSTANCE_TYPES[inst_type]["description"] ) )
             else:
-                non_default.append( '%s (%s)' % ( inst_type, zync.INSTANCE_TYPES[inst_type]["description"] ) ) 
+                non_default.append( '%s (%s)' % ( inst_type, zync.INSTANCE_TYPES[inst_type]["description"] ) )
         for label in non_default:
             cmds.menuItem( parent='instance_type', label=label )
 
@@ -431,7 +565,7 @@ class SubmitWindow(object):
         # put default renderer first
         default_renderer_name = zync.MAYA_RENDERERS[zync.MAYA_DEFAULT_RENDERER]
         cmds.menuItem(parent='renderer',
-                      label=default_renderer_name)
+            label=default_renderer_name)
 
         for item in zync.MAYA_RENDERERS.values():
             if item != default_renderer_name:
@@ -443,7 +577,7 @@ class SubmitWindow(object):
         cam_parents = [cmds.listRelatives(x, ap=True)[-1] for x in cmds.ls(cameras=True)]
         for cam in cam_parents:
             if ( cmds.getAttr( cam + '.renderable') ) == True:
-                cmds.menuItem( parent='camera', label=cam )	
+                cmds.menuItem( parent='camera', label=cam )
 
     def init_layers(self):
         self.layers = []
@@ -461,11 +595,12 @@ class SubmitWindow(object):
         We use this to allow ZYNC to skip the file checks.
 
         """
-        layers = [x for x in cmds.ls(type='renderLayer') \
-                       if x != 'defaultRenderLayer' and not ':' in x]
+        layers = [x for x in cmds.ls(type='renderLayer')\
+                  if x != 'defaultRenderLayer' and not ':' in x]
         references = cmds.file(q=True, r=True)
 
         layer_prefixes = dict()
+        layer_passes = dict()
         for layer in layers:
             if renderer == zync.VRAY_RENDERER:
                 node = 'vraySettings'
@@ -479,6 +614,10 @@ class SubmitWindow(object):
                 layer_prefixes[layer] = layer_prefix
             except Exception:
                 pass
+
+            if renderer in (zync.VRAY_RENDERER, zync.MENTAL_RAY_RENDERER):
+                passes = get_pass_names(renderer, layer)
+                layer_passes[layer] = passes
 
         if renderer == zync.VRAY_RENDERER:
             extension = cmds.getAttr('vraySettings.imageFormatStr')
@@ -499,7 +638,7 @@ class SubmitWindow(object):
 
         plugins = []
         plugin_list = cmds.pluginInfo( query=True, pluginsInUse=True )
-        for i in range( 0, len(plugin_list), 2): 
+        for i in range( 0, len(plugin_list), 2):
             plugins.append( str(plugin_list[i]) )
 
         if len(cmds.ls(type='cacheFile')) > 0:
@@ -511,7 +650,8 @@ class SubmitWindow(object):
                       'file_prefix': file_prefix,
                       'padding': padding,
                       'extension': extension,
-                      'plugins': plugins}
+                      'plugins': plugins,
+                      'layer_passes': layer_passes}
         return scene_info
 
     @staticmethod
@@ -554,6 +694,7 @@ class SubmitWindow(object):
             if not layers:
                 msg = 'Please select layer(s) to render.'
                 raise MayaZyncException(msg)
+            params['selected_layers'] = layers
             layers = ','.join(layers)
 
         username = eval_ui('username', text=True)
@@ -576,11 +717,21 @@ class SubmitWindow(object):
 
         z.add_path_mappings(window.path_mappings)
 
+        import pprint
+        pp = pprint.PrettyPrinter()
+        print pp.pprint(params)
+
+        if params['upload_only'] == 0:
+            create_local_paths(params)
+        del params['selected_layers']
+        del params['scene_info']['layer_passes']
+
         z.submit_job("maya", scene_path, layers, params=params)
+
         cmds.confirmDialog(title='Success',
-                               message='Job submitted to ZYNC.\n\nPlease ensure your Client App is running and logged in so your job can start.',
-                               button='OK',
-                               defaultButton='OK')
+            message='Job submitted to ZYNC.\n\nPlease ensure your Client App is running and logged in so your job can start.',
+            button='OK',
+            defaultButton='OK')
 
 def submit_dialog():
     submit_window = SubmitWindow()
