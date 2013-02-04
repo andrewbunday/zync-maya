@@ -214,15 +214,12 @@ def _gpu_handler(node):
 
 def _mrOptions_handler(node):
     """Handles mentalrayOptions nodes, for Final Gather"""
-    mapName = cmds.getAttr('%s.finalGatherFilename' % node).strip()
-    if mapName != "":
-        path = cmds.workspace(q=True, rd=True)
-        if path[-1] != "/":
-            path += "/"
-        path += "renderData/mentalray/finalgMap/"
-        path += mapName
-        if not mapName.endswith( ".fgmap" ):
-            path += ".fgmap"
+    work_space = cmds.workspace(q=True, rd=True)
+    map_name = cmds.getAttr('%s.finalGatherFilename' % node).strip()
+    if map_name:        
+        path = os.path.join(workspace, "renderData/mentalray/finalgMap", map_name)
+        if not path.endswith( ".fgmap" ):
+            "{0}.fgmap".format(path)
         yield (path,)
 
 def _mrIbl_handler(node):
